@@ -244,6 +244,251 @@ const processAttackWithCurrentHealth = (attacker, defender, attackType = 'auto',
     rarity: attacker.rarity
   };
   
+  const defenderWithHealth = {// src/components/BattleGame.jsx - ENHANCED VERSION WITH TEAM SELECTION - FIXED ENERGY REGENERATION AND AI ATTACK SEQUENCE
+import React, { useState, useEffect, useContext, useCallback, useReducer, useRef } from 'react';
+import { GameContext } from '../context/GameContext';
+import { useRadixConnect } from '../context/RadixConnectContext';
+import Battlefield from './battle/Battlefield';
+import PlayerHand from './battle/PlayerHand';
+import ActionPanel from './battle/ActionPanel';
+import BattleLog from './battle/BattleLog';
+import BattleHeader from './battle/BattleHeader';
+import DifficultySelector from './battle/DifficultySelector';
+import TeamSelector from './battle/TeamSelector';
+import BattleResult from './battle/BattleResult';
+import { calculateDerivedStats } from '../utils/battleCalculations';
+import { determineAIAction, determineAIStrategy } from '../utils/battleAI';
+import { 
+  processAttack, 
+  applyTool, 
+  applySpell, 
+  defendCreature,
+  applyFieldSynergies,
+  recalculateDerivedStats,
+  createSynergyEffectData,
+  processEnergyMomentum,
+  updateChargeEffects,
+  checkFieldSynergies,
+  getMaxHandSize  // ADD THIS IMPORT
+} from '../utils/battleCore';
+import { generateEnemyCreatures, getDifficultySettings, generateEnemyItems } from '../utils/difficultySettings';
+// NEW IMPORTS FOR STATUS EFFECTS
+import { 
+  applyStun, 
+  processStatusEffects, 
+  canCreatureAct,
+  isCreatureStunned 
+} from '../utils/statusEffects';
+
+// Import enhanced animation utilities
+import {
+  animateAttack,
+  animateDefend,
+  animateSpell,
+  animateTool,
+  animateTurnTransition,
+  showAIThinking,
+  showDamageNumber,
+  showBlockEffect,
+  showComboIndicator,
+  generateComboBurst,
+  screenFlash,
+  shakeScreen,
+  generateParticles,
+  getCreatureElementWithRetry,
+  waitForElement,
+  animateStatusEffect,
+  animateEnergyRegen,
+  animateSynergyActivation,
+  ANIMATION_DURATIONS
+} from '../utils/battleAnimations';
+
+// Import animation CSS
+import '../BattleAnimations.css';
+
+// Browser detection utility for targeted fixes
+const getBrowserInfo = () => {
+  const userAgent = navigator.userAgent;
+  let browserName = "unknown";
+  
+  if (userAgent.match(/chrome|chromium|crios/i)) {
+    browserName = "chrome";
+  } else if (userAgent.match(/firefox|fxios/i)) {
+    browserName = "firefox";
+  } else if (userAgent.match(/safari/i) && !userAgent.match(/chrome|chromium|crios/i)) {
+    browserName = "safari";
+  } else if (userAgent.match(/edg/i)) {
+    browserName = "edge";
+  }
+  
+  const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(userAgent);
+  
+  return {
+    browser: browserName,
+    isMobile: isMobile
+  };
+};
+
+// Health tracking debug helper
+const createHealthTracker = () => {
+  const healthLog = [];
+  
+  const logHealth = (stage, creature, additionalInfo = {}) => {
+    const entry = {
+      timestamp: Date.now(),
+      stage,
+      creatureId: creature.id,
+      creatureName: creature.species_name,
+      currentHealth: creature.currentHealth,
+      maxHealth: creature.maxHealth || creature.health,
+      ...additionalInfo
+    };
+    healthLog.push(entry);
+    console.log(`[HEALTH TRACKER] ${stage}: ${creature.species_name} = ${creature.currentHealth}/${creature.maxHealth || creature.health} HP`, additionalInfo);
+  };
+  
+  const printHealthTimeline = () => {
+    console.group('=== HEALTH TRACKING TIMELINE ===');
+    healthLog.forEach((entry, index) => {
+      console.log(`${index + 1}. [${entry.stage}] ${entry.creatureName}: ${entry.currentHealth} HP`);
+      if (entry.damage !== undefined) {
+        console.log(`   → Damage dealt: ${entry.damage}`);
+      }
+    });
+    console.groupEnd();
+  };
+  
+  const verifyHealthProgression = () => {
+    const creatureHealthMap = new Map();
+    let errors = [];
+    
+    healthLog.forEach((entry, index) => {
+      const key = entry.creatureId;
+      const previousEntry = creatureHealthMap.get(key);
+      
+      if (previousEntry && entry.currentHealth > previousEntry.currentHealth) {
+        // Health increased without healing - potential issue
+        if (!entry.healing) {
+          errors.push({
+            index,
+            creature: entry.creatureName,
+            issue: `Health increased from ${previousEntry.currentHealth} to ${entry.currentHealth} without healing`,
+            stage: entry.stage
+          });
+        }
+      }
+      
+      creatureHealthMap.set(key, entry);
+    });
+    
+    if (errors.length > 0) {
+      console.error('=== HEALTH TRACKING ERRORS FOUND ===');
+      errors.forEach(error => {
+        console.error(`Error at step ${error.index + 1}: ${error.issue}`);
+        console.error(`  Stage: ${error.stage}, Creature: ${error.creature}`);
+      });
+    } else {
+      console.log('✓ Health tracking verification passed - no anomalies detected');
+    }
+    
+    return errors.length === 0;
+  };
+  
+  return {
+    logHealth,
+    printHealthTimeline,
+    verifyHealthProgression,
+    getLog: () => healthLog
+  };
+};
+
+// BALANCED CONSTANTS for strategic gameplay
+const ATTACK_ENERGY_COST = 2;           
+const DEFEND_ENERGY_COST = 1;           
+const BASE_ENERGY_REGEN = 3;            
+const SPELL_ENERGY_COST = 4;            
+const TOOL_ENERGY_COST = 0;             
+const MAX_ENERGY = 25;                  
+const ENERGY_DECAY_RATE = 0.1;          
+
+// Action types for our reducer
+const ACTIONS = {
+  SET_DIFFICULTY: 'SET_DIFFICULTY',
+  SET_TEAM: 'SET_TEAM',
+  START_BATTLE: 'START_BATTLE',
+  DEPLOY_CREATURE: 'DEPLOY_CREATURE',
+  ENEMY_DEPLOY_CREATURE: 'ENEMY_DEPLOY_CREATURE',
+  UPDATE_CREATURE: 'UPDATE_CREATURE',
+  ATTACK: 'ATTACK',
+  USE_TOOL: 'USE_TOOL',
+  USE_SPELL: 'USE_SPELL',
+  DEFEND: 'DEFEND',
+  DRAW_CARD: 'DRAW_CARD',
+  REGENERATE_ENERGY: 'REGENERATE_ENERGY',
+  CALCULATE_AND_REGENERATE_ENERGY: 'CALCULATE_AND_REGENERATE_ENERGY', // NEW
+  APPLY_ENERGY_DECAY: 'APPLY_ENERGY_DECAY',
+  SET_ACTIVE_PLAYER: 'SET_ACTIVE_PLAYER',
+  INCREMENT_TURN: 'INCREMENT_TURN',
+  SET_GAME_STATE: 'SET_GAME_STATE',
+  APPLY_ONGOING_EFFECTS: 'APPLY_ONGOING_EFFECTS',
+  ADD_LOG: 'ADD_LOG',
+  SPEND_ENERGY: 'SPEND_ENERGY',
+  EXECUTE_AI_ACTION: 'EXECUTE_AI_ACTION',
+  EXECUTE_AI_ACTION_SEQUENCE: 'EXECUTE_AI_ACTION_SEQUENCE',
+  COMBO_BONUS: 'COMBO_BONUS',
+  SET_ENEMY_ENERGY: 'SET_ENEMY_ENERGY',
+  
+  // New action types for animation states
+  SET_ANIMATION_IN_PROGRESS: 'SET_ANIMATION_IN_PROGRESS',
+  QUEUE_ANIMATION: 'QUEUE_ANIMATION',
+  DEQUEUE_ANIMATION: 'DEQUEUE_ANIMATION',
+  
+  // New action types for synergies and momentum
+  APPLY_SYNERGIES: 'APPLY_SYNERGIES',
+  UPDATE_ENERGY_MOMENTUM: 'UPDATE_ENERGY_MOMENTUM',
+  SHOW_AI_STRATEGY: 'SHOW_AI_STRATEGY',
+  UPDATE_CHARGE_EFFECTS: 'UPDATE_CHARGE_EFFECTS',
+  
+  // FIXED: Add new action for updating all creatures
+  UPDATE_ALL_CREATURES: 'UPDATE_ALL_CREATURES',
+  
+  // FIX: Add new action for card drawing
+  DRAW_CARDS_IF_NEEDED: 'DRAW_CARDS_IF_NEEDED',
+  
+  // NEW: Add END_TURN action
+  END_TURN: 'END_TURN',
+  
+  // NEW: Status effect actions
+  APPLY_STATUS_EFFECT: 'APPLY_STATUS_EFFECT',
+  PROCESS_TURN_START: 'PROCESS_TURN_START',
+};
+
+// FIXED: Calculate energy cost for a creature
+const calculateCreatureEnergyCost = (creature) => {
+  let energyCost = 5;
+  
+  if (creature.form !== undefined && creature.form !== null) {
+    energyCost += parseInt(creature.form) || 0;
+  }
+  
+  return energyCost;
+};
+
+// FIXED: Helper function to process attack with current health values
+const processAttackWithCurrentHealth = (attacker, defender, attackType = 'auto', comboLevel = 0) => {
+  // CRITICAL FIX: Create proper objects that preserve ALL properties including buffs
+  const attackerWithHealth = {
+    ...attacker,
+    id: attacker.id,
+    species_name: attacker.species_name,
+    currentHealth: attacker.currentHealth,
+    battleStats: { ...attacker.battleStats }, // This includes buffed stats
+    activeEffects: attacker.activeEffects ? [...attacker.activeEffects] : [],
+    stats: attacker.stats, // Include base stats for effectiveness calculation
+    form: attacker.form,
+    rarity: attacker.rarity
+  };
+  
   const defenderWithHealth = {
     ...defender,
     id: defender.id,
@@ -550,6 +795,7 @@ const battleReducer = (state, action) => {
         }
       };
     
+    // SIMPLIFIED: Spells now work like tools
     case ACTIONS.USE_SPELL:
       const { spellResult, spell } = action;
       
@@ -561,6 +807,7 @@ const battleReducer = (state, action) => {
       const isPlayerCaster = state.playerField.some(c => c.id === spellResult.updatedCaster.id);
       const isPlayerTarget = state.playerField.some(c => c.id === spellResult.updatedTarget.id);
       
+      // Energy check
       if (isPlayerCaster && state.playerEnergy < (action.energyCost || SPELL_ENERGY_COST)) {
         console.error("Not enough energy for spell");
         return state;
@@ -570,46 +817,59 @@ const battleReducer = (state, action) => {
         return state;
       }
       
-      // Update fields with spell results
-      return {
+      // Update fields with spell results (simplified - spells work like tools now!)
+      const updatedSpellState = {
         ...state,
         playerField: state.playerField.map(c => {
-          if (isPlayerCaster && c.id === spellResult.updatedCaster.id) {
-            return spellResult.updatedCaster;
-          }
-          if (isPlayerTarget && c.id === spellResult.updatedTarget.id) {
-            return spellResult.updatedTarget;
-          }
+          if (c.id === spellResult.updatedCaster.id) return spellResult.updatedCaster;
+          if (c.id === spellResult.updatedTarget.id) return spellResult.updatedTarget;
           return c;
         }).filter(c => c.currentHealth > 0),
         enemyField: state.enemyField.map(c => {
-          if (!isPlayerCaster && c.id === spellResult.updatedCaster.id) {
-            return spellResult.updatedCaster;
-          }
-          if (!isPlayerTarget && c.id === spellResult.updatedTarget.id) {
-            return spellResult.updatedTarget;
-          }
+          if (c.id === spellResult.updatedCaster.id) return spellResult.updatedCaster;
+          if (c.id === spellResult.updatedTarget.id) return spellResult.updatedTarget;
           return c;
         }).filter(c => c.currentHealth > 0),
-        playerEnergy: isPlayerCaster ? Math.max(0, state.playerEnergy - (action.energyCost || SPELL_ENERGY_COST)) : state.playerEnergy,
-        enemyEnergy: !isPlayerCaster ? Math.max(0, state.enemyEnergy - (action.energyCost || SPELL_ENERGY_COST)) : state.enemyEnergy,
-        playerSpells: isPlayerCaster ? state.playerSpells.filter(s => s.id !== spell.id) : state.playerSpells,
-        enemySpells: action.isEnemySpell ? state.enemySpells.filter(s => s.id !== spell.id) : state.enemySpells,
+        playerEnergy: isPlayerCaster ? 
+          Math.max(0, state.playerEnergy - (action.energyCost || SPELL_ENERGY_COST)) : 
+          state.playerEnergy,
+        enemyEnergy: !isPlayerCaster ? 
+          Math.max(0, state.enemyEnergy - (action.energyCost || SPELL_ENERGY_COST)) : 
+          state.enemyEnergy,
+        playerSpells: isPlayerCaster ? 
+          state.playerSpells.filter(s => s.id !== spell.id) : 
+          state.playerSpells,
+        enemySpells: action.isEnemySpell ? 
+          state.enemySpells.filter(s => s.id !== spell.id) : 
+          state.enemySpells,
         consecutiveActions: isPlayerCaster
           ? { ...state.consecutiveActions, player: state.consecutiveActions.player + 1 }
           : { ...state.consecutiveActions, enemy: state.consecutiveActions.enemy + 1 },
         energyMomentum: isPlayerCaster
           ? { ...state.energyMomentum, player: state.energyMomentum.player + (action.energyCost || SPELL_ENERGY_COST) }
           : { ...state.energyMomentum, enemy: state.energyMomentum.enemy + (action.energyCost || SPELL_ENERGY_COST) },
-        // Add animation tracking for spells
+        // Track for animations
         lastSpellCast: {
           spellId: action.spell.id,
           casterId: spellResult.updatedCaster.id,
           targetId: spellResult.updatedTarget.id,
           spell: action.spell,
-          damage: spellResult.spellEffect?.damage || 0
+          damage: spellResult.spellEffect?.damage || 0,
+          healing: spellResult.spellEffect?.healing || 0
         }
       };
+      
+      // Update synergies if creatures were defeated
+      if (updatedSpellState.playerField.length !== state.playerField.length) {
+        updatedSpellState.activeSynergies = checkFieldSynergies(updatedSpellState.playerField);
+        updatedSpellState.playerField = applyFieldSynergies(updatedSpellState.playerField);
+      }
+      if (updatedSpellState.enemyField.length !== state.enemyField.length) {
+        updatedSpellState.enemyActiveSynergies = checkFieldSynergies(updatedSpellState.enemyField);
+        updatedSpellState.enemyField = applyFieldSynergies(updatedSpellState.enemyField);
+      }
+      
+      return updatedSpellState;
     
     case ACTIONS.DEFEND:
       const isPlayerDefending = state.playerField.some(c => c.id === action.updatedCreature.id);
@@ -822,8 +1082,9 @@ const battleReducer = (state, action) => {
         gameState: action.gameState
       };
     
+    // SIMPLIFIED: Remove processTimedEffect usage
     case ACTIONS.APPLY_ONGOING_EFFECTS: {
-      // COMPLETE FIX: Track health changes for animations
+      // Track health changes for animations
       const creaturesBeforeEffects = new Map();
       
       // Store current health for all creatures
@@ -855,12 +1116,10 @@ const battleReducer = (state, action) => {
           activeEffects.forEach(effect => {
             if (!effect) return;
             
-            // Use processTimedEffect for special effects
-            const processedEffect = processTimedEffect(effect, state.turn, effect.startTurn || 0);
-            
+            // SIMPLIFIED: Apply effects directly without processTimedEffect
             // Apply stat modifications
-            if (processedEffect.statModifications) {
-              Object.entries(processedEffect.statModifications).forEach(([stat, value]) => {
+            if (effect.statModifications) {
+              Object.entries(effect.statModifications).forEach(([stat, value]) => {
                 if (updatedCreature.battleStats[stat] !== undefined) {
                   updatedCreature.battleStats[stat] += value;
                 }
@@ -868,11 +1127,11 @@ const battleReducer = (state, action) => {
             }
             
             // Apply health over time
-            if (processedEffect.healthOverTime !== undefined && processedEffect.healthOverTime !== 0) {
+            if (effect.healthOverTime !== undefined && effect.healthOverTime !== 0) {
               const previousHealth = updatedCreature.currentHealth;
               updatedCreature.currentHealth = Math.min(
                 updatedCreature.battleStats.maxHealth,
-                Math.max(0, updatedCreature.currentHealth + processedEffect.healthOverTime)
+                Math.max(0, updatedCreature.currentHealth + effect.healthOverTime)
               );
               
               const healthChange = updatedCreature.currentHealth - previousHealth;
@@ -894,7 +1153,7 @@ const battleReducer = (state, action) => {
               }
             }
             
-            const updatedEffect = { ...processedEffect, duration: effect.duration - 1 };
+            const updatedEffect = { ...effect, duration: effect.duration - 1 };
             
             if (updatedEffect.duration > 0) {
               remainingEffects.push(updatedEffect);
@@ -930,12 +1189,10 @@ const battleReducer = (state, action) => {
           activeEffects.forEach(effect => {
             if (!effect) return;
             
-            // Use processTimedEffect for special effects
-            const processedEffect = processTimedEffect(effect, state.turn, effect.startTurn || 0);
-            
+            // SIMPLIFIED: Apply effects directly without processTimedEffect
             // Apply stat modifications
-            if (processedEffect.statModifications) {
-              Object.entries(processedEffect.statModifications).forEach(([stat, value]) => {
+            if (effect.statModifications) {
+              Object.entries(effect.statModifications).forEach(([stat, value]) => {
                 if (updatedCreature.battleStats[stat] !== undefined) {
                   updatedCreature.battleStats[stat] += value;
                 }
@@ -943,11 +1200,11 @@ const battleReducer = (state, action) => {
             }
             
             // Apply health over time
-            if (processedEffect.healthOverTime !== undefined && processedEffect.healthOverTime !== 0) {
+            if (effect.healthOverTime !== undefined && effect.healthOverTime !== 0) {
               const previousHealth = updatedCreature.currentHealth;
               updatedCreature.currentHealth = Math.min(
                 updatedCreature.battleStats.maxHealth,
-                Math.max(0, updatedCreature.currentHealth + processedEffect.healthOverTime)
+                Math.max(0, updatedCreature.currentHealth + effect.healthOverTime)
               );
               
               const healthChange = updatedCreature.currentHealth - previousHealth;
@@ -969,7 +1226,7 @@ const battleReducer = (state, action) => {
               }
             }
             
-            const updatedEffect = { ...processedEffect, duration: effect.duration - 1 };
+            const updatedEffect = { ...effect, duration: effect.duration - 1 };
             
             if (updatedEffect.duration > 0) {
               remainingEffects.push(updatedEffect);
@@ -998,7 +1255,7 @@ const battleReducer = (state, action) => {
       const updatedEnemyField = action.updatedEnemyField || 
         processedEnemyField.filter(c => c.currentHealth > 0);
       
-      // COMPLETE FIX: Store health change information for animations
+      // Store health change information for animations
       const healingDamageEvents = [];
       
       [...updatedPlayerField, ...updatedEnemyField].forEach((creature, index) => {
@@ -3290,7 +3547,7 @@ const BattleGame = ({ onClose }) => {
     
   }, [playerField, difficulty, turn, selectedCreature, addToBattleLog, queueAnimation, queueStatusEffectAnimation]);
   
-  // COMPLETE FIX: Replace the useSpell callback
+  // SIMPLIFIED: Clean up animation queueing in useSpell callback
   const useSpell = useCallback((spell, caster, target, isPlayerSpell = true) => {
     console.log(`\n=== CASTING SPELL: ${spell.name} ===`);
     
@@ -3316,10 +3573,6 @@ const BattleGame = ({ onClose }) => {
     const effectiveTarget = target || caster;
     console.log(`Caster: ${caster.species_name}, Target: ${effectiveTarget.species_name}`);
     
-    // COMPLETE FIX: Store health before spell for all creatures
-    const targetHealthBefore = effectiveTarget.currentHealth;
-    const casterHealthBefore = caster.currentHealth;
-    
     // Pass current turn to applySpell
     const spellResult = applySpell(caster, effectiveTarget, spell, difficulty, turn);
     
@@ -3328,7 +3581,6 @@ const BattleGame = ({ onClose }) => {
       return;
     }
     
-    // ADD THIS SECTION FOR STUN HANDLING (SHARDSTORM):
     // Check if spell applies stun (specifically for Shardstorm)
     if (spellResult.spellEffect?.applyStun && effectiveTarget) {
       // Apply stun to target
@@ -3354,12 +3606,6 @@ const BattleGame = ({ onClose }) => {
       });
     }
     
-    // CRITICAL: Extract damage and healing from spellEffect
-    const spellDamage = spellResult.spellEffect.damage || 0;
-    const spellHealing = spellResult.spellEffect.healing || 0;
-    
-    console.log(`Spell result - Damage: ${spellDamage}, Healing: ${spellHealing}`);
-    
     // Dispatch the spell action
     dispatch({ 
       type: ACTIONS.USE_SPELL, 
@@ -3376,16 +3622,7 @@ const BattleGame = ({ onClose }) => {
       
     addToBattleLog(`${caster.species_name} cast ${spell.name} ${targetText}. (-${energyCost} energy)`);
     
-    // Log damage/healing if any
-    if (spellDamage > 0) {
-      addToBattleLog(`The spell dealt ${spellDamage} damage!`);
-    }
-    
-    if (spellHealing > 0) {
-      addToBattleLog(`The spell healed for ${spellHealing} health!`);
-    }
-    
-    // Queue spell animation (visual only)
+    // SIMPLIFIED animation queueing - spells work like tools now!
     queueAnimation({
       type: 'spell',
       casterId: caster.id,
@@ -3393,63 +3630,50 @@ const BattleGame = ({ onClose }) => {
       spell: spell
     });
     
-    // COMPLETE FIX: Queue all damage and healing animations
-    const animations = [];
-    
-    // 1. Damage to target (instant or first tick)
-    if (spellDamage > 0) {
-      animations.push({
+    // Queue damage/healing numbers based on actual results
+    if (spellResult.spellEffect.damage > 0) {
+      queueAnimation({
         type: 'damage-number',
         targetId: effectiveTarget.id,
-        amount: spellDamage,
+        amount: spellResult.spellEffect.damage,
         damageDisplayType: 'magical',
         isCritical: spellResult.spellEffect.wasCritical || false,
-        isBlocked: false,
-        damageType: 'normal',
-        delay: 1000 // After spell animation
+        delay: 1000
       });
     }
     
-    // 2. Instant healing to target
-    if (spellResult.updatedTarget) {
-      const targetHealthAfter = spellResult.updatedTarget.currentHealth;
-      const targetHealing = targetHealthAfter - targetHealthBefore;
-      
-      if (targetHealing > 0) {
-        animations.push({
-          type: 'damage-number',
-          targetId: effectiveTarget.id,
-          amount: targetHealing,
-          damageDisplayType: 'magical',
-          isCritical: false,
-          isBlocked: false,
-          damageType: 'heal',
-          delay: 1200
-        });
-      }
+    if (spellResult.spellEffect.healing > 0) {
+      queueAnimation({
+        type: 'damage-number',
+        targetId: effectiveTarget.id,
+        amount: spellResult.spellEffect.healing,
+        damageDisplayType: 'heal',
+        damageType: 'heal',
+        delay: 1200
+      });
     }
     
-    // 3. Caster healing from drain effects (only if caster != target)
-    if (spellResult.updatedCaster && caster.id !== effectiveTarget.id) {
-      const casterHealthAfter = spellResult.updatedCaster.currentHealth;
-      const casterHealing = casterHealthAfter - casterHealthBefore;
-      
-      if (casterHealing > 0) {
-        animations.push({
-          type: 'damage-number',
-          targetId: caster.id,
-          amount: casterHealing,
-          damageDisplayType: 'magical',
-          isCritical: false,
-          isBlocked: false,
-          damageType: 'heal',
-          delay: 1400 // After damage shows
-        });
-      }
+    // Special animations for specific spell types
+    if (spell.name === 'Shardstorm' && spellResult.spellEffect.charging) {
+      queueAnimation({
+        type: 'screen-effect',
+        effect: 'flash',
+        params: {
+          color: 'rgba(147, 112, 219, 0.3)',
+          duration: 1000,
+          intensity: 0.5
+        }
+      });
     }
     
-    // Queue all animations
-    animations.forEach(anim => queueAnimation(anim));
+    if (spellResult.spellEffect.applyStun) {
+      queueAnimation({
+        type: 'status-effect',
+        targetId: effectiveTarget.id,
+        effect: 'stun',
+        delay: 1500
+      });
+    }
     
   }, [playerEnergy, playerField, difficulty, turn, addToBattleLog, queueAnimation]);
   
@@ -3707,6 +3931,7 @@ const BattleGame = ({ onClose }) => {
     }
   }, [difficulty, enemyHand, enemyField, playerField, enemyTools, enemySpells, turn, playerHand, consecutiveActions, energyMomentum]);
   
+  // SIMPLIFIED: Remove checks for instant vs duration spells in AI spell case
   const executeSingleAIActionWithAnimation = useCallback((aiAction, callback) => {
     console.log("Executing single AI action:", aiAction.type);
     const currentEnergy = currentEnemyEnergyRef.current;
@@ -4161,7 +4386,7 @@ const BattleGame = ({ onClose }) => {
         }
         break;
         
-      // COMPLETE FIX: In executeSingleAIActionWithAnimation, replace the 'useSpell' case:
+      // SIMPLIFIED: No special handling for instant vs duration spells
       case 'useSpell':
         if (!aiAction.spell || !aiAction.caster || !aiAction.target) {
           console.log("AI Error: Missing spell, caster, or target");
@@ -4200,10 +4425,6 @@ const BattleGame = ({ onClose }) => {
         
         console.log(`AI casting spell: ${aiAction.spell.name}`);
         
-        // COMPLETE FIX: Store health before for all creatures involved
-        const casterHealthBefore = currentCaster.currentHealth;
-        const targetHealthBefore = currentSpellTarget.currentHealth;
-        
         const spellResult = applySpell(currentCaster, currentSpellTarget, aiAction.spell, difficulty, turn);
         
         if (spellResult && spellResult.spellEffect) {
@@ -4225,7 +4446,7 @@ const BattleGame = ({ onClose }) => {
             s => s.id !== aiAction.spell.id
           );
           
-          // Get actual damage/healing from result
+          // SIMPLIFIED: Just handle damage and healing
           const spellDamage = spellResult.spellEffect.damage || 0;
           const spellHealing = spellResult.spellEffect.healing || 0;
           
@@ -4286,12 +4507,9 @@ const BattleGame = ({ onClose }) => {
             onComplete: safeCallback
           });
           
-          // COMPLETE FIX: Queue all damage and healing numbers
-          const animations = [];
-          
-          // 1. Show damage number if spell dealt damage
+          // Queue damage and healing numbers
           if (spellDamage > 0) {
-            animations.push({
+            queueAnimation({
               type: 'damage-number',
               targetId: currentSpellTarget.id,
               amount: spellDamage,
@@ -4303,46 +4521,18 @@ const BattleGame = ({ onClose }) => {
             });
           }
           
-          // 2. Check target healing
-          if (spellResult.updatedTarget) {
-            const targetHealthAfter = spellResult.updatedTarget.currentHealth;
-            const targetHealing = targetHealthAfter - targetHealthBefore;
-            
-            if (targetHealing > 0 && spellDamage === 0) { // Don't show healing if damage was shown
-              animations.push({
-                type: 'damage-number',
-                targetId: currentSpellTarget.id,
-                amount: targetHealing,
-                damageDisplayType: 'magical',
-                isCritical: false,
-                isBlocked: false,
-                damageType: 'heal',
-                delay: 500
-              });
-            }
+          if (spellHealing > 0) {
+            queueAnimation({
+              type: 'damage-number',
+              targetId: currentSpellTarget.id,
+              amount: spellHealing,
+              damageDisplayType: 'magical',
+              isCritical: false,
+              isBlocked: false,
+              damageType: 'heal',
+              delay: 700
+            });
           }
-          
-          // 3. Check caster healing (for drain spells)
-          if (spellResult.updatedCaster && currentCaster.id !== currentSpellTarget.id) {
-            const casterHealthAfter = spellResult.updatedCaster.currentHealth;
-            const casterHealing = casterHealthAfter - casterHealthBefore;
-            
-            if (casterHealing > 0) {
-              animations.push({
-                type: 'damage-number',
-                targetId: currentCaster.id,
-                amount: casterHealing,
-                damageDisplayType: 'magical',
-                isCritical: false,
-                isBlocked: false,
-                damageType: 'heal',
-                delay: 700 // After damage
-              });
-            }
-          }
-          
-          // Queue all animations
-          animations.forEach(anim => queueAnimation(anim));
         } else {
           console.log("AI spell cast failed");
           safeCallback();
