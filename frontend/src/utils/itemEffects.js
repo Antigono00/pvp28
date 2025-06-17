@@ -1,4 +1,4 @@
-// src/utils/itemEffects.js - COMPLETE PRODUCTION-READY VERSION WITH SPELL FIXES
+// src/utils/itemEffects.js - COMPLETE PRODUCTION-READY VERSION WITH UNIFIED SPELL SYSTEM
 
 // ============================================
 // TOOL DEFINITIONS - 5 Specific Tool NFTs
@@ -153,35 +153,38 @@ const TOOL_DEFINITIONS = {
 // ============================================
 
 const SPELL_DEFINITIONS = {
-  // 1. Babylon Burst - Energy/Surge: Instant massive energy damage
+  // Babylon Burst - Instant massive damage with crit and armor piercing
   'Babylon Burst': {
     id: 'babylon_burst',
     type: 'spell',
     element: 'energy',
     effect: 'surge',
     energyCost: 4,
-    duration: 0, // Instant
+    duration: 1,
     imageUrl: 'https://cvxlab.net/assets/spells/babylon_burst.png',
-    execute: (caster, target, battleState) => {
+    applyFunction: (caster, target, turn) => {
+      if (turn > 1) return { damage: 0 };
+      
       const magicPower = 1 + ((caster.battleStats?.magic || 5) * 0.15);
       const baseDamage = 30;
       const damage = Math.round(baseDamage * magicPower);
       
-      // 20% critical chance
+      // Preserve critical hit functionality
       const isCritical = Math.random() < 0.20;
       const finalDamage = Math.round(isCritical ? damage * 1.5 : damage);
       
       return {
-        damage: finalDamage, // Primary damage property
-        critical: isCritical,
-        armorPiercing: true,
-        duration: 0,
-        logMessage: `${caster.species_name || 'Caster'} unleashes Babylon Burst for ${finalDamage} damage${isCritical ? ' (CRITICAL!)' : ''}!`
+        damage: finalDamage,
+        isCritical: isCritical,
+        armorPiercing: true, // Preserve armor piercing
+        statChanges: {},
+        healthOverTime: 0,
+        logMessage: `${caster.species_name} unleashes Babylon Burst for ${finalDamage} damage${isCritical ? ' (CRITICAL!)' : ''}!`
       };
     }
   },
 
-  // 2. Scrypto Surge - FIXED to apply damage/healing properly
+  // Scrypto Surge - Drain spell (damage + self heal + stat changes)
   'Scrypto Surge': {
     id: 'scrypto_surge',
     type: 'spell',
@@ -190,97 +193,80 @@ const SPELL_DEFINITIONS = {
     energyCost: 4,
     duration: 3,
     imageUrl: 'https://cvxlab.net/assets/spells/scrypto_surge.png',
-    applyEffect: (caster, target, turn) => {
+    applyFunction: (caster, target, turn) => {
       const magicPower = 1 + ((caster.battleStats?.magic || 5) * 0.15);
       const baseDamage = 12;
       const damage = Math.round(baseDamage * magicPower);
       const healing = Math.round(10 * magicPower);
       
-      // Apply stat changes only on first turn
-      const statChanges = turn === 1 ? {
-        target: {
-          physicalAttack: -4,
-          magicalAttack: -4
-        },
-        caster: {
-          physicalAttack: 3,
-          magicalAttack: 3
-        }
-      } : { target: {}, caster: {} };
+      // Stat changes only on first turn (preserve original behavior)
+      const targetStatChanges = turn === 1 ? {
+        physicalAttack: -4,
+        magicalAttack: -4
+      } : {};
+      
+      const casterStatChanges = turn === 1 ? {
+        physicalAttack: 3,
+        magicalAttack: 3
+      } : {};
       
       return {
-        damage: damage,          // Damage to target
-        selfHeal: healing,       // Healing to caster
-        statChanges: statChanges,
+        damage: damage,
+        selfHeal: healing,
+        statChanges: targetStatChanges,
+        selfStatChanges: casterStatChanges,
+        healthOverTime: 0,
         logMessage: turn === 1 ? 
           `Scrypto Surge drains ${damage} HP and heals ${caster.species_name} for ${healing} HP!` :
           `Scrypto Surge continues to drain ${damage} HP and heal ${healing} HP!`
       };
-    }
+    },
+    // Mark as cross-creature effect
+    crossCreature: true
   },
 
-  // 3. Shardstorm - Magic/Charge: Charges up for massive damage
-  'Shardstorm': {
-    id: 'shardstorm',
-    type: 'spell',
-    element: 'magic',
-    effect: 'charge',
-    energyCost: 4,
-    chargeTime: 1,
-    duration: 0, // Instant after charge
-    imageUrl: 'https://cvxlab.net/assets/spells/shardstorm.png',
-    execute: (caster, target, battleState) => {
-      const magicPower = 1 + ((caster.battleStats?.magic || 5) * 0.15);
-      const baseDamage = 35;
-      const damage = Math.round(baseDamage * magicPower);
-      
-      // 20% stun chance
-      const isStunned = Math.random() < 0.20;
-      
-      return {
-        damage: damage, // Primary damage property
-        areaEffect: true,
-        applyStun: isStunned, // Flag for battle system to apply stun
-        duration: 0,
-        prepareEffect: { turns: 1 },
-        logMessage: `Shardstorm erupts for ${damage} area damage${isStunned ? ' and STUNS the target!' : ''}!`
-      };
-    }
-  },
-
-  // 4. Cerberus Chain - FIXED for proper instant heal + regeneration
+  // Cerberus Chain - Instant heal + buffs + regen
   'Cerberus Chain': {
     id: 'cerberus_chain',
     type: 'spell',
     element: 'stamina',
     effect: 'shield',
     energyCost: 4,
-    duration: 0, // Instant effect
-    instantEffect: true,
+    duration: 3,
     imageUrl: 'https://cvxlab.net/assets/spells/cerberus_chain.png',
-    execute: (caster, target, battleState) => {
+    applyFunction: (caster, target, turn) => {
       const magicPower = 1 + ((caster.battleStats?.magic || 5) * 0.15);
-      const instantHeal = Math.round(15 * magicPower);
       
-      return {
-        healing: instantHeal,    // Instant healing
-        duration: 0,
-        isHealing: true,
-        isInstant: true,         // Mark as instant to ensure immediate application
-        statChanges: {
-          physicalDefense: 8,
-          magicalDefense: 8,
-          maxHealth: 15
-        },
-        buffDuration: 3,
-        damageReduction: 0.15,
-        healthOverTime: Math.round(5 * magicPower), // Regeneration per turn
-        logMessage: `Cerberus Chain heals ${instantHeal} HP and grants powerful defenses!`
-      };
+      if (turn === 1) {
+        // First turn: Big instant heal (58 base at magic 19) + buffs
+        const instantHeal = Math.round(15 * magicPower);
+        
+        return {
+          damage: 0,
+          healthOverTime: instantHeal, // This will apply immediately
+          statChanges: {
+            physicalDefense: 8,
+            magicalDefense: 8,
+            maxHealth: 15
+          },
+          damageReduction: 0.15, // Preserve damage reduction
+          logMessage: `Cerberus Chain heals ${instantHeal} HP and grants powerful defenses!`
+        };
+      } else {
+        // Subsequent turns: Just regen (5 * magic power)
+        const regenHeal = Math.round(5 * magicPower);
+        
+        return {
+          damage: 0,
+          healthOverTime: regenHeal,
+          statChanges: {}, // Stats already applied
+          logMessage: `Cerberus Chain regenerates ${regenHeal} HP`
+        };
+      }
     }
   },
 
-  // 5. Engine Overclock - FIXED to properly heal target
+  // Engine Overclock - Echo effect with decay
   'Engine Overclock': {
     id: 'engine_overclock',
     type: 'spell',
@@ -289,35 +275,68 @@ const SPELL_DEFINITIONS = {
     energyCost: 4,
     duration: 4,
     imageUrl: 'https://cvxlab.net/assets/spells/engine_overclock.png',
-    applyEffect: (caster, target, turn) => {
-      // Echo effect: starts strong, decays each turn
+    applyFunction: (caster, target, turn) => {
+      // Echo decay: 100%, 70%, 49%, 34%
       const echoMultiplier = Math.pow(0.7, turn - 1);
+      const magicPower = 1 + ((caster.battleStats?.magic || 5) * 0.15);
       
-      const baseStats = {
-        initiative: 10,
-        dodgeChance: 3,
-        criticalChance: 3
-      };
-      
-      const statChanges = {
-        target: {
-          initiative: Math.round(baseStats.initiative * echoMultiplier),
-          dodgeChance: Math.round(baseStats.dodgeChance * echoMultiplier),
-          criticalChance: Math.round(baseStats.criticalChance * echoMultiplier)
-        }
-      };
-      
-      const healing = Math.round(3 * echoMultiplier);
+      // Base values that decay
+      const baseHealing = 3;
+      const healing = Math.max(1, Math.round(baseHealing * echoMultiplier * magicPower));
       
       return {
-        statChanges: statChanges,
-        targetHeal: healing,     // FIXED: Use targetHeal instead of selfHeal
         damage: 0,
+        healthOverTime: healing, // Healing that echoes and decays
+        statChanges: {
+          initiative: Math.round(10 * echoMultiplier),
+          dodgeChance: Math.round(3 * echoMultiplier),
+          criticalChance: Math.round(3 * echoMultiplier)
+        },
+        echoPercent: Math.round(echoMultiplier * 100), // For UI display
         logMessage: turn === 1 ? 
-          `Engine Overclock boosts ${target.species_name}'s speed and regeneration!` : 
-          `Engine Overclock echoes continue (${Math.round(echoMultiplier * 100)}% power)...`
+          `Engine Overclock boosts ${target.species_name}'s speed and heals ${healing} HP!` : 
+          `Engine Overclock echoes (${Math.round(echoMultiplier * 100)}% power) - healing ${healing} HP`
       };
-    }
+    },
+    echoEffect: true // Mark as echo for special handling
+  },
+
+  // Shardstorm - Charge spell with stun
+  'Shardstorm': {
+    id: 'shardstorm',
+    type: 'spell',
+    element: 'magic',
+    effect: 'charge',
+    energyCost: 4,
+    duration: 2,
+    imageUrl: 'https://cvxlab.net/assets/spells/shardstorm.png',
+    applyFunction: (caster, target, turn) => {
+      if (turn === 1) {
+        // Charge turn - no damage
+        return {
+          damage: 0,
+          statChanges: {},
+          healthOverTime: 0,
+          charging: true,
+          logMessage: `${caster.species_name} begins charging Shardstorm...`
+        };
+      } else {
+        // Damage turn
+        const magicPower = 1 + ((caster.battleStats?.magic || 5) * 0.15);
+        const damage = Math.round(35 * magicPower);
+        const isStunned = Math.random() < 0.20;
+        
+        return {
+          damage: damage,
+          areaEffect: true, // Preserve area effect
+          applyStun: isStunned,
+          statChanges: {},
+          healthOverTime: 0,
+          logMessage: `Shardstorm erupts for ${damage} area damage${isStunned ? ' and STUNS the target!' : ''}!`
+        };
+      }
+    },
+    chargeEffect: true // Mark as charge spell
   }
 };
 
@@ -388,20 +407,16 @@ export const getToolEffect = (tool) => {
   };
 };
 
-// Get spell effect - NOW SPECIFIC TO EACH SPELL - FIXED FOR CERBERUS CHAIN
+// UPDATE getSpellEffect to return EXACTLY the same structure as tools
 export const getSpellEffect = (spell, casterMagic = 5) => {
   if (!spell) {
     console.error("Invalid spell data: null or undefined");
-    return {
-      damage: 10,
-      duration: 0
-    };
+    return null;
   }
   
-  // Support both old format (with spell_type/spell_effect) and new format (with name)
   let spellName = spell.name;
   
-  // Fallback: Try to map old format to new spell names
+  // Fallback mapping for legacy data
   if (!spellName && spell.spell_type && spell.spell_effect) {
     const mapping = {
       'energy-surge': 'Babylon Burst',
@@ -416,102 +431,32 @@ export const getSpellEffect = (spell, casterMagic = 5) => {
   
   const definition = SPELL_DEFINITIONS[spellName];
   if (!definition) {
-    console.warn(`Unknown spell: ${spellName}, using generic effect`);
-    // Fallback to generic if needed
-    return {
-      damage: Math.round(15 * (1 + casterMagic * 0.15)),
-      duration: 0
-    };
+    console.warn(`Unknown spell: ${spellName}`);
+    return null;
   }
   
-  // CRITICAL FIX: For Cerberus Chain and other instant effect spells
-  // Check if it's an instant effect spell (duration 0 or instantEffect flag)
-  if (definition.execute && (definition.duration === 0 || definition.instantEffect)) {
-    // Execute and return the full effect configuration
-    const executionResult = definition.execute(
-      { battleStats: { magic: casterMagic }, species_name: 'Caster' }, 
-      { species_name: 'Target' }, 
-      null
-    );
-    
-    // Mark this as an instant execution result
-    return {
-      ...executionResult,
-      isInstantExecution: true,
-      spellName: spellName,
-      isHealing: executionResult.isHealing || false // ADDED: Pass healing flag
-    };
-  }
-  
-  // For duration spells with applyEffect (like Scrypto Surge, Engine Overclock)
-  if (definition.applyEffect && definition.duration > 0) {
-    // Create a full effect structure for duration spells
-    const firstTickEffect = definition.applyEffect(
-      { battleStats: { magic: casterMagic }, species_name: 'Caster' },
-      { species_name: 'Target' },
-      1 // First turn
-    );
-    
-    return {
-      name: spellName,
-      duration: definition.duration,
-      applyFunction: definition.applyEffect,
-      element: definition.element,
-      effect: definition.effect,
-      energyCost: definition.energyCost,
-      applyEachTurn: true,
-      // Include first tick values for immediate application
-      damageOverTime: firstTickEffect.damage || 0,
-      healingOverTime: firstTickEffect.selfHeal || 0,
-      statChanges: firstTickEffect.statChanges?.target || {},
-      selfStatChanges: firstTickEffect.statChanges?.caster || {},
-      selfHealOverTime: firstTickEffect.selfHeal || 0
-    };
-  }
-  
-  // For charge spells (like Shardstorm)
-  if (definition.chargeTime) {
-    return {
-      name: spellName,
-      prepareEffect: { turns: definition.chargeTime },
-      executeFunction: definition.execute,
-      energyCost: definition.energyCost,
-      isChargeSpell: true
-    };
-  }
-  
-  // Default fallback
+  // Return UNIFIED structure (same as tools!)
   return {
-    damage: Math.round(15 * (1 + casterMagic * 0.15)),
-    duration: 0
+    name: spellName,
+    duration: definition.duration,
+    applyFunction: definition.applyFunction,
+    applyEachTurn: true,
+    element: definition.element,
+    effect: definition.effect,
+    energyCost: definition.energyCost,
+    // Special flags
+    crossCreature: definition.crossCreature || false,
+    echoEffect: definition.echoEffect || false,
+    chargeEffect: definition.chargeEffect || false,
+    // For backwards compatibility
+    effectType: definition.effect,
+    spellName: spellName
   };
 };
 
 // ============================================
 // HELPER FUNCTIONS (Maintain backwards compatibility)
 // ============================================
-
-// Apply active effects each turn
-export const applyActiveEffects = (creature, activeEffects, currentTurn) => {
-  const results = [];
-  
-  activeEffects.forEach(effect => {
-    if (effect.applyFunction) {
-      const turnsActive = currentTurn - (effect.startTurn || 0) + 1;
-      
-      if (turnsActive <= effect.duration) {
-        const result = effect.applyFunction(creature, turnsActive);
-        results.push({
-          ...result,
-          effectName: effect.name || effect.effectName,
-          turnsRemaining: effect.duration - turnsActive
-        });
-      }
-    }
-  });
-  
-  return results;
-};
 
 // Calculate effect power (keeping for compatibility)
 export const calculateEffectPower = (item, casterStats, difficulty = 'medium') => {
@@ -569,121 +514,6 @@ export const calculateComboEffect = (comboLevel) => {
   return Math.min(1.5 + (comboLevel - 2) * 0.5, 5); // Cap at 5x
 };
 
-// Process timed effects (charge, echo, etc.)
-export const processTimedEffect = (effect, currentTurn, startTurn = 0) => {
-  if (!effect) return null;
-  
-  const turnsActive = currentTurn - (startTurn || 0);
-  
-  // Handle charge effects
-  if (effect.effectType === 'Charge' || effect.effectType === 'charge') {
-    const chargeLevel = Math.min(turnsActive + 1, effect.maxTurns || 4);
-    const chargePercent = (chargeLevel / (effect.maxTurns || 4)) * 100;
-    
-    // Calculate damage/healing/stats for this turn
-    let damageThisTurn = 0;
-    let healingThisTurn = 0;
-    let statModifications = {};
-    
-    if (effect.chargeEffect) {
-      // Damage builds up
-      if (effect.chargeEffect.damageBase) {
-        damageThisTurn = effect.chargeEffect.damageBase + 
-          (effect.chargeEffect.damageIncrease * (chargeLevel - 1));
-      }
-      
-      // Healing builds up
-      if (effect.chargeEffect.healingBase) {
-        healingThisTurn = effect.chargeEffect.healingBase + 
-          (effect.chargeEffect.healingIncrease * (chargeLevel - 1));
-      }
-      
-      // Stats build up
-      if (effect.chargeEffect.targetStats && effect.chargeEffect.baseValue) {
-        effect.chargeEffect.targetStats.forEach(stat => {
-          statModifications[stat] = effect.chargeEffect.baseValue + 
-            (effect.chargeEffect.perTurnIncrease * (chargeLevel - 1));
-        });
-      }
-      
-      // Final burst on last turn
-      if (chargeLevel >= (effect.maxTurns || 4) && effect.chargeEffect.finalBurst) {
-        damageThisTurn += effect.chargeEffect.finalBurst;
-      }
-    }
-    
-    return {
-      ...effect,
-      chargeLevel,
-      chargePercent,
-      isReady: chargeLevel >= (effect.maxTurns || 4),
-      isFinalBurst: chargeLevel >= (effect.maxTurns || 4),
-      damageThisTurn,
-      healingThisTurn,
-      statModifications
-    };
-  }
-  
-  // Handle echo effects
-  if (effect.effectType === 'Echo' || effect.effectType === 'echo') {
-    const echoMultiplier = Math.pow(effect.decayRate || 0.7, turnsActive);
-    
-    // Calculate values for this turn
-    let damageThisTurn = 0;
-    let healingThisTurn = 0;
-    let statModifications = {};
-    
-    if (effect.echoEffect) {
-      if (effect.echoEffect.damageBase) {
-        damageThisTurn = Math.round(effect.echoEffect.damageBase * echoMultiplier);
-      }
-      
-      if (effect.echoEffect.healingBase) {
-        healingThisTurn = Math.round(effect.echoEffect.healingBase * echoMultiplier);
-      }
-      
-      if (effect.echoEffect.statBase) {
-        Object.entries(effect.echoEffect.statBase).forEach(([stat, value]) => {
-          statModifications[stat] = Math.round(value * echoMultiplier);
-        });
-      }
-    }
-    
-    // Fallback for effects without echoEffect structure
-    if (effect.damageOverTime) {
-      damageThisTurn = Math.round(effect.damageOverTime * echoMultiplier);
-    }
-    
-    if (effect.healthOverTime || effect.healingOverTime) {
-      healingThisTurn = Math.round((effect.healthOverTime || effect.healingOverTime) * echoMultiplier);
-    }
-    
-    if (effect.statModifications) {
-      Object.entries(effect.statModifications).forEach(([stat, value]) => {
-        statModifications[stat] = Math.round(value * echoMultiplier);
-      });
-    }
-    
-    return {
-      ...effect,
-      currentMultiplier: echoMultiplier,
-      effectiveness: Math.round(echoMultiplier * 100),
-      damageThisTurn,
-      healingThisTurn,
-      healthOverTime: healingThisTurn, // For compatibility
-      statModifications
-    };
-  }
-  
-  // Default handling for standard effects
-  return {
-    ...effect,
-    damageThisTurn: effect.damageOverTime || 0,
-    healingThisTurn: effect.healingOverTime || effect.healthOverTime || 0,
-    statModifications: effect.statModifications || {}
-  };
-};
-
 // Get visual effect data (animations, particles, etc.)
 export const getVisualEffectData = (effectName) => {
   const visualEffects = {
@@ -731,6 +561,18 @@ export const getVisualEffectData = (effectName) => {
     duration: 500,
     intensity: 'low'
   };
+};
+
+// Helper for spell icons
+const getSpellIcon = (effect) => {
+  const icons = {
+    'surge': '💥',
+    'shield': '✨',
+    'echo': '🌊',
+    'drain': '🌙',
+    'charge': '☄️'
+  };
+  return icons[effect] || '✨';
 };
 
 // Calculate item efficiency (for AI)
@@ -824,11 +666,9 @@ export default {
   calculateEffectPower,
   getEffectDescription,
   calculateComboEffect,
-  processTimedEffect,
   getVisualEffectData,
   calculateItemEfficiency,
   getRecommendedItemUsage,
   // Additional exports that might be used
-  applyActiveEffects,
   getVisualEffectInfo
 };
